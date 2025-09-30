@@ -207,7 +207,6 @@ class WCPP_Import {
 		$sku             = isset( $product_data['sku'] ) ? wc_clean( $product_data['sku'] ) : '';
 		$type            = isset( $product_data['type'] ) ? wc_clean( $product_data['type'] ) : 'simple';
 		$update_existing = ! empty( $state['update_existing'] );
-		$product_id      = 0;
 		$is_new          = false;
 
 		$existing_id = $sku ? wc_get_product_id_by_sku( $sku ) : 0;
@@ -225,7 +224,7 @@ class WCPP_Import {
 			$is_new  = true;
 		}
 
-		if ( ! $product ) {
+		if ( ! $product || ! $product instanceof WC_Product ) {
 			return array(
 				'message' => sprintf( __( 'ERROR: Unable to create product of type %s.', 'wc-product-porter' ), esc_html( $type ) ),
 			);
@@ -236,27 +235,49 @@ class WCPP_Import {
 		list( $attributes, $attribute_terms ) = $this->prepare_attributes_for_import( $product_data );
 		$product->set_attributes( $attributes );
 
+		$prepared_taxonomies = $this->prepare_taxonomy_terms( isset( $product_data['taxonomies'] ) ? $product_data['taxonomies'] : array() );
+		$manual_taxonomies   = $this->apply_product_taxonomy_props( $product, $prepared_taxonomies );
+
+		$this->apply_custom_meta( $product, isset( $product_data['meta'] ) ? $product_data['meta'] : array() );
+
+		$assigned_attachments = $this->assign_images( $product, isset( $product_data['images'] ) ? $product_data['images'] : array(), $state );
+
+		$product = apply_filters( 'woocommerce_product_import_pre_insert_product_object', $product, $product_data );
+
+		if ( is_wp_error( $product ) || ! $product instanceof WC_Product ) {
+			return array(
+				'message' => sprintf( __( 'ERROR: Unable to create product of type %s.', 'wc-product-porter' ), esc_html( $type ) ),
+			);
+		}
+
 		$product->save();
 		$product_id = $product->get_id();
 
-		$this->assign_taxonomies( $product_id, isset( $product_data['taxonomies'] ) ? $product_data['taxonomies'] : array() );
+		$term_assignments = $this->merge_taxonomy_assignments( $manual_taxonomies, $attribute_terms );
 
-		foreach ( $attribute_terms as $taxonomy => $term_ids ) {
-			if ( ! empty( $term_ids ) ) {
-				wp_set_object_terms( $product_id, $term_ids, $taxonomy );
-			}
+		if ( ! empty( $term_assignments ) ) {
+			$this->assign_manual_taxonomies( $product_id, $term_assignments );
 		}
 
-		$this->assign_images( $product, isset( $product_data['images'] ) ? $product_data['images'] : array(), $state );
-		$product->save();
-
-		$this->apply_custom_meta( $product_id, isset( $product_data['meta'] ) ? $product_data['meta'] : array() );
+		if ( ! empty( $assigned_attachments ) ) {
+			$this->maybe_update_attachment_parents( $product_id, $assigned_attachments );
+		}
 
 		if ( 'variable' === $product->get_type() ) {
 			$this->sync_variations( $product, isset( $product_data['variations'] ) ? $product_data['variations'] : array(), $state );
 		}
 
+		if ( function_exists( 'wc_update_product_lookup_tables' ) ) {
+			wc_update_product_lookup_tables( $product_id );
+		}
+
+		if ( function_exists( 'wc_delete_product_transients' ) ) {
+			wc_delete_product_transients( $product_id );
+		}
+
 		$action = $is_new ? __( 'Created', 'wc-product-porter' ) : __( 'Updated', 'wc-product-porter' );
+
+		do_action( 'woocommerce_product_import_inserted_product_object', $product, $product_data );
 
 		return array(
 			'message' => sprintf( __( 'SUCCESS: %1$s "%2$s" (SKU: %3$s)', 'wc-product-porter' ), $action, $product->get_name(), $sku ? $sku : __( 'N/A', 'wc-product-porter' ) ),
@@ -271,11 +292,20 @@ class WCPP_Import {
 	 * @return WC_Product|false
 	 */
 	protected function create_product_instance( $type ) {
+		$type = $type ? sanitize_title( $type ) : 'simple';
+
+		if ( function_exists( 'wc_get_product_object' ) ) {
+			$product = wc_get_product_object( $type );
+
+			if ( $product instanceof WC_Product ) {
+				return $product;
+			}
+		}
+
 		switch ( $type ) {
-			case 'simple':
-				return new WC_Product_Simple();
 			case 'variable':
 				return new WC_Product_Variable();
+			case 'simple':
 			default:
 				return new WC_Product_Simple();
 		}
@@ -403,8 +433,9 @@ class WCPP_Import {
 	 * @param int   $product_id Product ID.
 	 * @param array $taxonomies Taxonomy => slugs map.
 	 */
-	protected function assign_taxonomies( $product_id, $taxonomies ) {
+	protected function prepare_taxonomy_terms( $taxonomies ) {
 		$taxonomies = is_array( $taxonomies ) ? $taxonomies : array();
+		$result     = array();
 
 		foreach ( $taxonomies as $taxonomy => $slugs ) {
 			if ( ! taxonomy_exists( $taxonomy ) ) {
@@ -422,7 +453,125 @@ class WCPP_Import {
 				}
 			}
 
-			wp_set_object_terms( $product_id, $term_ids, $taxonomy );
+			if ( $term_ids ) {
+				$result[ $taxonomy ] = array_values( array_unique( $term_ids ) );
+			}
+		}
+
+		return $result;
+	}
+
+	/**
+	 * Apply taxonomy relationships using product setters when available.
+	 *
+	 * @param WC_Product $product         Product instance.
+	 * @param array      $taxonomy_terms  Taxonomy => term IDs map.
+	 *
+	 * @return array Taxonomies that need to be applied manually via wp_set_object_terms().
+	 */
+	protected function apply_product_taxonomy_props( WC_Product $product, array $taxonomy_terms ) {
+		$manual = array();
+
+		foreach ( $taxonomy_terms as $taxonomy => $term_ids ) {
+			switch ( $taxonomy ) {
+				case 'product_cat':
+					$product->set_category_ids( $term_ids );
+					break;
+				case 'product_tag':
+					$product->set_tag_ids( $term_ids );
+					break;
+				default:
+					$manual[ $taxonomy ] = $term_ids;
+					break;
+			}
+		}
+
+		return $manual;
+	}
+
+	/**
+	 * Merge taxonomy assignments ensuring term lists remain unique.
+	 *
+	 * @param array $manual_taxonomies  Taxonomy => term IDs requiring manual assignment.
+	 * @param array $attribute_terms    Attribute taxonomy => term IDs.
+	 *
+	 * @return array
+	 */
+	protected function merge_taxonomy_assignments( array $manual_taxonomies, array $attribute_terms ) {
+		$merged = $manual_taxonomies;
+
+		foreach ( $attribute_terms as $taxonomy => $term_ids ) {
+			if ( empty( $term_ids ) ) {
+				continue;
+			}
+
+			if ( isset( $merged[ $taxonomy ] ) ) {
+				$merged[ $taxonomy ] = array_values( array_unique( array_merge( $merged[ $taxonomy ], $term_ids ) ) );
+			} else {
+				$merged[ $taxonomy ] = $term_ids;
+			}
+		}
+
+		return $merged;
+	}
+
+	/**
+	 * Apply taxonomy relationships using wp_set_object_terms().
+	 *
+	 * @param int   $product_id Product ID.
+	 * @param array $taxonomies Taxonomy => term IDs map.
+	 */
+	protected function assign_manual_taxonomies( $product_id, array $taxonomies ) {
+		$product_id = (int) $product_id;
+
+		if ( ! $product_id || empty( $taxonomies ) ) {
+			return;
+		}
+
+		foreach ( $taxonomies as $taxonomy => $term_ids ) {
+			if ( empty( $term_ids ) || ! taxonomy_exists( $taxonomy ) ) {
+				continue;
+			}
+
+			wp_set_object_terms( $product_id, array_values( array_unique( array_map( 'intval', $term_ids ) ) ), $taxonomy );
+		}
+	}
+
+	/**
+	 * Ensure imported attachments are linked to the product post.
+	 *
+	 * @param int   $product_id      Product ID.
+	 * @param array $attachment_ids  Attachment IDs to link.
+	 */
+	protected function maybe_update_attachment_parents( $product_id, array $attachment_ids ) {
+		$product_id     = (int) $product_id;
+		$attachment_ids = array_values( array_unique( array_map( 'intval', $attachment_ids ) ) );
+
+		if ( ! $product_id || empty( $attachment_ids ) ) {
+			return;
+		}
+
+		foreach ( $attachment_ids as $attachment_id ) {
+			if ( ! $attachment_id ) {
+				continue;
+			}
+
+			$attachment = get_post( $attachment_id );
+
+			if ( ! $attachment || 'attachment' !== $attachment->post_type ) {
+				continue;
+			}
+
+			if ( (int) $attachment->post_parent === $product_id ) {
+				continue;
+			}
+
+			wp_update_post(
+				array(
+					'ID'          => $attachment_id,
+					'post_parent' => $product_id,
+				)
+			);
 		}
 	}
 
@@ -432,45 +581,54 @@ class WCPP_Import {
 	 * @param WC_Product $product Product instance.
 	 * @param array      $images  Image data.
 	 * @param array      $state   Import state (passed by reference).
+	 *
+	 * @return array Attachment IDs that were imported/attached.
 	 */
 	protected function assign_images( WC_Product $product, $images, array &$state ) {
-		$images = is_array( $images ) ? $images : array();
-
-		$featured = isset( $images['featured'] ) ? $images['featured'] : '';
-		$gallery  = isset( $images['gallery'] ) ? (array) $images['gallery'] : array();
+		$images           = is_array( $images ) ? $images : array();
+		$featured         = isset( $images['featured'] ) ? $images['featured'] : '';
+		$gallery          = isset( $images['gallery'] ) ? (array) $images['gallery'] : array();
+		$assigned_media   = array();
+		$resolved_gallery = array();
 
 		if ( $featured ) {
 			$attachment_id = $this->import_image_from_temp( $featured, $product->get_id(), $state );
 
 			if ( $attachment_id ) {
 				$product->set_image_id( $attachment_id );
+				$assigned_media[] = (int) $attachment_id;
 			}
 		}
-
-		$gallery_ids = array();
 
 		foreach ( $gallery as $filename ) {
 			$attachment_id = $this->import_image_from_temp( $filename, $product->get_id(), $state );
 
 			if ( $attachment_id ) {
-				$gallery_ids[] = $attachment_id;
+				$resolved_gallery[] = (int) $attachment_id;
+				$assigned_media[]   = (int) $attachment_id;
 			}
 		}
 
-		$product->set_gallery_image_ids( array_values( array_unique( $gallery_ids ) ) );
+		if ( $resolved_gallery ) {
+			$product->set_gallery_image_ids( array_values( array_unique( $resolved_gallery ) ) );
+		} else {
+			$product->set_gallery_image_ids( array() );
+		}
+
+		return array_values( array_unique( $assigned_media ) );
 	}
 
 	/**
 	 * Apply custom meta values.
 	 *
-	 * @param int   $product_id Product ID.
-	 * @param array $meta       Meta data.
+	 * @param WC_Product $product Product instance.
+	 * @param array      $meta    Meta data.
 	 */
-	protected function apply_custom_meta( $product_id, $meta ) {
+	protected function apply_custom_meta( WC_Product $product, $meta ) {
 		$meta = is_array( $meta ) ? $meta : array();
 
 		foreach ( $meta as $key => $value ) {
-			update_post_meta( $product_id, $key, $value );
+			$product->update_meta_data( $key, $value );
 		}
 	}
 
