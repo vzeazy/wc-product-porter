@@ -1,0 +1,84 @@
+.wcpp-importer .wcpp-field-group {
+	margin-bottom: 1.5rem;
+}
+
+.wcpp-importer .wcpp-field-label {
+	display: block;
+	font-weight: 600;
+	margin-bottom: 0.5rem;
+}
+
+.wcpp-importer input[type="file"] {
+	width: 100%;
+	max-width: 25rem;
+}
+
+.wcpp-importer .wcpp-field-checkbox {
+	display: flex;
+	gap: 0.5rem;
+	align-items: center;
+}
+
+.wcpp-importer .wcpp-actions {
+	display: flex;
+	gap: 0.75rem;
+	align-items: center;
+}
+
+.wcpp-progress {
+	position: relative;
+	margin-top: 1.5rem;
+	height: 1.5rem;
+	background: #f1f1f1;
+	border-radius: 4px;
+	overflow: hidden;
+	max-width: 30rem;
+}
+
+.wcpp-progress-bar {
+	height: 100%;
+	background: #0073aa;
+	width: 0;
+	transition: width 0.3s ease;
+}
+
+.wcpp-progress-text {
+	position: absolute;
+	top: 50%;
+	left: 50%;
+	transform: translate(-50%, -50%);
+	font-weight: 600;
+	color: #fff;
+}
+
+.wcpp-log {
+	margin-top: 1.5rem;
+	padding: 1rem;
+	background: #fff;
+	border: 1px solid #ccd0d4;
+	max-width: 40rem;
+	overflow-y: auto;
+	max-height: 18rem;
+	white-space: pre-wrap;
+	font-family: Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+
+.wcpp-log .wcpp-log-line {
+	margin: 0 0 0.5rem;
+}
+
+.wcpp-log .wcpp-log-line.info {
+	color: #0073aa;
+}
+
+.wcpp-log .wcpp-log-line.success {
+	color: #1d6f42;
+}
+
+.wcpp-log .wcpp-log-line.error {
+	color: #b32d2e;
+}
+
+.wcpp-log .wcpp-log-line.warning {
+	color: #d48b07;
+}
