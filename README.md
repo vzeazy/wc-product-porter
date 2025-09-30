@@ -1,5 +1,7 @@
 # Product Porter for WooCommerce
 
+![Product Porter Logo](assets/imgs/product-porter.png)
+
 A powerful WordPress plugin that enables seamless export and import of WooCommerce products using portable ZIP packages. Perfect for migrating products between sites, creating backups, or sharing product catalogs.
 
 [![Version](https://img.shields.io/badge/version-0.1.0-blue.svg)](https://github.com/vzeazy/wc-product-porter)
